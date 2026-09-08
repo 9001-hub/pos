@@ -1,0 +1,675 @@
+<div id="pos-root" style="font-family: Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color:#16241C; background:#EEF0EC; min-height:600px; padding:20px; box-sizing:border-box; border-radius:8px; position:relative;">
+  <div id="pos-loading" style="padding:40px; text-align:center; color:#6B7266; font-size:13px;">Loading shop data…</div>
+  <div id="pos-app" style="display:none;"></div>
+</div>
+
+<script>
+(function () {
+  const INK = "#16241C", PAGE = "#EEF0EC", PANEL = "#FFFFFF", LINE = "#D9DACF",
+        GREEN = "#2F6B4F", GREEN_DARK = "#1E4936", ORANGE = "#C85A1D",
+        RED = "#A8382C", MUTED = "#6B7266", MONO = "'IBM Plex Mono', ui-monospace, monospace";
+
+  const DEFAULT_SETTINGS = { shopName: "Corner Shop", taxRate: 0.08, nextOrderNumber: 1 };
+  const DEFAULT_USERS = [
+    { id: "u_admin", name: "Admin", username: "admin", password: "admin123", role: "admin" },
+    { id: "u_cashier", name: "Cashier", username: "cashier", password: "cashier123", role: "cashier" },
+  ];
+  const DEFAULT_PRODUCTS = [
+    { id: "p1", name: "Cotton crew tee", cat: "Apparel", price: 14.5, stock: 40 },
+    { id: "p2", name: "Denim jacket", cat: "Apparel", price: 68.0, stock: 12 },
+    { id: "p3", name: "Wool beanie", cat: "Apparel", price: 18.0, stock: 25 },
+    { id: "p5", name: "USB-C charging cable", cat: "Electronics", price: 12.99, stock: 60 },
+    { id: "p6", name: "Wireless earbuds", cat: "Electronics", price: 79.0, stock: 15 },
+    { id: "p9", name: "Ceramic mug set", cat: "Home", price: 24.0, stock: 20 },
+    { id: "p11", name: "Scented candle", cat: "Home", price: 16.0, stock: 30 },
+    { id: "p13", name: "Roasted coffee beans 500g", cat: "Grocery", price: 13.25, stock: 45 },
+    { id: "p14", name: "Honey jar 340g", cat: "Grocery", price: 8.5, stock: 35 },
+    { id: "p17", name: "Shea butter lotion", cat: "Beauty", price: 15.0, stock: 22 },
+  ];
+  const CATS = ["All", "Apparel", "Electronics", "Home", "Grocery", "Beauty"];
+  const CAT_STRIP = { Apparel: "#7F77DD", Electronics: "#378ADD", Home: "#639922", Grocery: "#BA7517", Beauty: "#D4537E" };
+
+  let state = {
+    settings: null,
+    products: null,
+    orders: null,
+    users: null,
+    currentUser: null,
+    cart: [],
+    tab: "sell",
+    cat: "All",
+    query: "",
+    payment: "Card",
+    receipt: null,
+    editingProduct: null,
+    editingUser: null,
+    error: null,
+    loginUsername: "",
+    loginError: "",
+  };
+
+  function money(n) {
+    return (Number(n) || 0).toLocaleString(undefined, { style: "currency", currency: "USD" });
+  }
+  function esc(s) {
+    return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  }
+  function isAdmin() { return state.currentUser && state.currentUser.role === "admin"; }
+
+  async function loadAll() {
+    try {
+      let settings;
+      try { const r = await window.storage.get("settings", true); settings = r ? JSON.parse(r.value) : DEFAULT_SETTINGS; }
+      catch (e) { settings = DEFAULT_SETTINGS; }
+
+      let products;
+      try { const r = await window.storage.get("products", true); products = r ? JSON.parse(r.value) : DEFAULT_PRODUCTS; }
+      catch (e) { products = DEFAULT_PRODUCTS; }
+
+      let orders;
+      try { const r = await window.storage.get("orders", true); orders = r ? JSON.parse(r.value) : []; }
+      catch (e) { orders = []; }
+
+      let users;
+      try { const r = await window.storage.get("users", true); users = r ? JSON.parse(r.value) : DEFAULT_USERS; }
+      catch (e) { users = DEFAULT_USERS; }
+
+      state.settings = settings;
+      state.products = products;
+      state.orders = orders;
+      state.users = users;
+
+      if (!(await keyExists("settings"))) await saveSettings();
+      if (!(await keyExists("products"))) await saveProducts();
+      if (!(await keyExists("orders"))) await saveOrders();
+      if (!(await keyExists("users"))) await saveUsers();
+
+      document.getElementById("pos-loading").style.display = "none";
+      document.getElementById("pos-app").style.display = "block";
+      render();
+    } catch (err) {
+      document.getElementById("pos-loading").innerHTML =
+        "<div style='color:#A8382C;'>Couldn't load shop data. " + (err && err.message ? err.message : "Unknown error") + "</div>";
+    }
+  }
+
+  async function keyExists(key) {
+    try { const r = await window.storage.get(key, true); return !!r; } catch (e) { return false; }
+  }
+  async function saveSettings() { try { await window.storage.set("settings", JSON.stringify(state.settings), true); } catch (e) { flashError("Couldn't save settings."); } }
+  async function saveProducts() { try { await window.storage.set("products", JSON.stringify(state.products), true); } catch (e) { flashError("Couldn't save inventory."); } }
+  async function saveOrders() { try { await window.storage.set("orders", JSON.stringify(state.orders), true); } catch (e) { flashError("Couldn't save order."); } }
+  async function saveUsers() { try { await window.storage.set("users", JSON.stringify(state.users), true); } catch (e) { flashError("Couldn't save staff accounts."); } }
+
+  function flashError(msg) {
+    state.error = msg;
+    render();
+    setTimeout(() => { state.error = null; render(); }, 3500);
+  }
+
+  function addToCart(id) {
+    const product = state.products.find((p) => p.id === id);
+    if (!product) return;
+    const inCart = state.cart.find((i) => i.id === id);
+    const qtyInCart = inCart ? inCart.qty : 0;
+    if (qtyInCart >= product.stock) { flashError("Not enough stock for " + product.name + "."); return; }
+    if (inCart) inCart.qty += 1;
+    else state.cart.push({ id: product.id, name: product.name, price: product.price, qty: 1 });
+    render();
+  }
+
+  function changeQty(id, delta) {
+    const item = state.cart.find((i) => i.id === id);
+    if (!item) return;
+    const product = state.products.find((p) => p.id === id);
+    if (delta > 0 && product && item.qty >= product.stock) { flashError("Not enough stock for " + item.name + "."); return; }
+    item.qty += delta;
+    state.cart = state.cart.filter((i) => i.qty > 0);
+    render();
+  }
+
+  function removeItem(id) { state.cart = state.cart.filter((i) => i.id !== id); render(); }
+
+  function cartTotals() {
+    const subtotal = state.cart.reduce((s, i) => s + i.price * i.qty, 0);
+    const tax = subtotal * (state.settings.taxRate || 0);
+    return { subtotal, tax, total: subtotal + tax };
+  }
+
+  async function charge() {
+    if (state.cart.length === 0 || !state.currentUser) return;
+    for (const item of state.cart) {
+      const product = state.products.find((p) => p.id === item.id);
+      if (!product || product.stock < item.qty) { flashError("Stock changed — please review your cart."); render(); return; }
+    }
+    const { subtotal, tax, total } = cartTotals();
+    const order = {
+      id: "o_" + Date.now(),
+      number: state.settings.nextOrderNumber,
+      items: state.cart.map((i) => ({ ...i })),
+      subtotal, tax, total,
+      payment: state.payment,
+      time: new Date().toISOString(),
+      cashierId: state.currentUser.id,
+      cashierName: state.currentUser.name,
+    };
+    state.products = state.products.map((p) => {
+      const item = state.cart.find((i) => i.id === p.id);
+      return item ? { ...p, stock: p.stock - item.qty } : p;
+    });
+    state.orders = [order, ...state.orders];
+    state.settings.nextOrderNumber += 1;
+
+    await saveProducts();
+    await saveOrders();
+    await saveSettings();
+
+    state.receipt = order;
+    render();
+  }
+
+  function newSale() { state.cart = []; state.receipt = null; render(); }
+
+  async function upsertProduct(product) {
+    if (!isAdmin()) return;
+    const exists = state.products.some((p) => p.id === product.id);
+    state.products = exists ? state.products.map((p) => (p.id === product.id ? product : p)) : [...state.products, product];
+    await saveProducts();
+    state.editingProduct = null;
+    render();
+  }
+
+  async function deleteProduct(id) {
+    if (!isAdmin()) return;
+    state.products = state.products.filter((p) => p.id !== id);
+    await saveProducts();
+    render();
+  }
+
+  async function resetAllData() {
+    if (!isAdmin()) return;
+    state.settings = { ...DEFAULT_SETTINGS };
+    state.products = DEFAULT_PRODUCTS.map((p) => ({ ...p }));
+    state.orders = [];
+    state.cart = [];
+    state.receipt = null;
+    await saveSettings();
+    await saveProducts();
+    await saveOrders();
+    render();
+  }
+
+  async function upsertUser(user) {
+    if (!isAdmin()) return;
+    const exists = state.users.some((u) => u.id === user.id);
+    const dupUsername = state.users.some((u) => u.username.toLowerCase() === user.username.toLowerCase() && u.id !== user.id);
+    if (dupUsername) { flashError("That username is already taken."); return; }
+    state.users = exists ? state.users.map((u) => (u.id === user.id ? user : u)) : [...state.users, user];
+    await saveUsers();
+    state.editingUser = null;
+    render();
+  }
+
+  async function deleteUser(id) {
+    if (!isAdmin()) return;
+    const admins = state.users.filter((u) => u.role === "admin");
+    const target = state.users.find((u) => u.id === id);
+    if (target && target.role === "admin" && admins.length <= 1) { flashError("Can't delete the last admin account."); return; }
+    if (state.currentUser && state.currentUser.id === id) { flashError("Can't delete the account you're signed in as."); return; }
+    state.users = state.users.filter((u) => u.id !== id);
+    await saveUsers();
+    render();
+  }
+
+  // ---------- render ----------
+
+  function render() {
+    const root = document.getElementById("pos-app");
+    if (!state.currentUser) {
+      root.innerHTML = renderLoginScreen();
+      bindLoginEvents();
+      return;
+    }
+    root.innerHTML = renderShell();
+    bindEvents();
+  }
+
+  function renderLoginScreen() {
+    return `
+      <div style="min-height:420px; display:flex; align-items:center; justify-content:center;">
+        <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:10px; padding:28px; width:280px; box-sizing:border-box;">
+          <div style="font-weight:600; font-size:16px; margin-bottom:2px;">${esc(state.settings.shopName)}</div>
+          <div style="font-size:12px; color:${MUTED}; margin-bottom:16px;">Sign in to continue</div>
+          <input id="login-username" placeholder="Username" style="width:100%; padding:9px; border:1px solid ${LINE}; border-radius:5px; font-size:13px; box-sizing:border-box; margin-bottom:8px;" />
+          <input id="login-password" type="password" placeholder="Password" style="width:100%; padding:9px; border:1px solid ${LINE}; border-radius:5px; font-size:13px; box-sizing:border-box; margin-bottom:8px;" />
+          ${state.loginError ? `<div style="color:${RED}; font-size:12px; margin-bottom:8px;">${esc(state.loginError)}</div>` : ""}
+          <button data-do-login style="width:100%; padding:9px; border-radius:6px; border:none; background:${GREEN}; color:#fff; font-size:13px; font-weight:600; cursor:pointer;">Sign in</button>
+          <div style="font-size:11px; color:${MUTED}; margin-top:14px; text-align:center;">Default admin: admin / admin123</div>
+        </div>
+      </div>
+    `;
+  }
+
+  function bindLoginEvents() {
+    const root = document.getElementById("pos-app");
+    const doLoginBtn = root.querySelector("[data-do-login]");
+    const attempt = () => {
+      const username = document.getElementById("login-username").value.trim();
+      const password = document.getElementById("login-password").value;
+      const user = state.users.find((u) => u.username.toLowerCase() === username.toLowerCase() && u.password === password);
+      if (user) { state.currentUser = user; state.loginError = ""; state.tab = "sell"; }
+      else { state.loginError = "Incorrect username or password."; }
+      render();
+    };
+    if (doLoginBtn) doLoginBtn.onclick = attempt;
+    ["login-username", "login-password"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.addEventListener("keydown", (e) => { if (e.key === "Enter") attempt(); });
+    });
+  }
+
+  function renderShell() {
+    const tabs = isAdmin() ? ["sell", "inventory", "sales", "staff", "settings"] : ["sell", "sales"];
+    return `
+      <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:16px; flex-wrap:wrap; gap:10px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span style="font-weight:600; font-size:16px;">${esc(state.settings.shopName)}</span>
+        </div>
+        <div style="display:flex; align-items:center; gap:10px;">
+          <div style="display:flex; gap:4px; background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:3px;">
+            ${tabs.map(tabBtn).join("")}
+          </div>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <span style="font-size:12px; color:${isAdmin() ? GREEN_DARK : MUTED}; font-weight:${isAdmin() ? 600 : 400};">${esc(state.currentUser.name)} &middot; ${isAdmin() ? "Admin" : "Cashier"}</span>
+            <button data-logout style="padding:6px 12px; border-radius:6px; border:1px solid ${LINE}; background:${PANEL}; font-size:12px; cursor:pointer;">Sign out</button>
+          </div>
+        </div>
+      </div>
+      ${state.error ? `<div style="background:#FBEAEA; color:${RED}; border:1px solid ${RED}; border-radius:6px; padding:8px 12px; font-size:13px; margin-bottom:12px;">${esc(state.error)}</div>` : ""}
+      ${state.tab === "sell" ? renderSell() : ""}
+      ${state.tab === "inventory" && isAdmin() ? renderInventory() : ""}
+      ${state.tab === "sales" ? renderSales() : ""}
+      ${state.tab === "staff" && isAdmin() ? renderStaff() : ""}
+      ${state.tab === "settings" && isAdmin() ? renderSettings() : ""}
+    `;
+  }
+
+  function tabBtn(id) {
+    const active = state.tab === id;
+    const label = { sell: "Sell", inventory: "Inventory", sales: "Sales", staff: "Staff", settings: "Settings" }[id];
+    return `<button data-tab="${id}" style="padding:6px 14px; border-radius:6px; border:none; font-size:13px; cursor:pointer;
+      background:${active ? GREEN_DARK : "transparent"}; color:${active ? "#F2F5F0" : INK}; font-weight:${active ? 600 : 400};">${label}</button>`;
+  }
+
+  function renderSell() {
+    const filtered = state.products.filter((p) => {
+      const matchesCat = state.cat === "All" || p.cat === state.cat;
+      const matchesQuery = p.name.toLowerCase().includes(state.query.toLowerCase());
+      return matchesCat && matchesQuery;
+    });
+    const { subtotal, tax, total } = cartTotals();
+    const itemCount = state.cart.reduce((s, i) => s + i.qty, 0);
+
+    return `
+      <div style="display:flex; gap:20px; align-items:flex-start; flex-wrap:wrap;">
+        <div style="flex:1 1 58%; min-width:280px;">
+          <div style="display:flex; gap:8px; margin-bottom:12px; flex-wrap:wrap;">
+            <div style="display:flex; align-items:center; gap:8px; background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:8px 10px; flex:1 1 200px; min-width:160px;">
+              <input id="pos-search" value="${esc(state.query)}" placeholder="Search products" style="border:none; outline:none; font-size:14px; width:100%; background:transparent; color:${INK};" />
+            </div>
+          </div>
+          <div style="display:flex; gap:8px; margin-bottom:14px; flex-wrap:wrap;">
+            ${CATS.map((c) => {
+              const active = state.cat === c;
+              return `<button data-cat="${esc(c)}" style="padding:6px 13px; border-radius:7px; font-size:13px; cursor:pointer;
+                border:1px solid ${active ? GREEN_DARK : LINE}; background:${active ? GREEN_DARK : PANEL}; color:${active ? "#F2F5F0" : INK}; font-weight:${active ? 600 : 400};">${esc(c)}</button>`;
+            }).join("")}
+          </div>
+          <div style="display:grid; grid-template-columns:repeat(auto-fill, minmax(140px,1fr)); gap:10px;">
+            ${filtered.map((p) => {
+              const outOfStock = p.stock <= 0;
+              return `<button data-add="${p.id}" ${outOfStock ? "disabled" : ""} style="background:${PANEL}; border:1px solid ${LINE}; border-radius:6px; overflow:hidden; text-align:left; cursor:${outOfStock ? "default" : "pointer"}; padding:0; opacity:${outOfStock ? 0.5 : 1};">
+                <div style="height:5px; background:${CAT_STRIP[p.cat] || MUTED};"></div>
+                <div style="padding:10px 11px 12px;">
+                  <div style="font-size:13px; font-weight:500; margin-bottom:6px; line-height:1.3; min-height:34px;">${esc(p.name)}</div>
+                  <div style="font-family:${MONO}; font-size:14px; font-weight:600; color:${GREEN_DARK};">${money(p.price)}</div>
+                  <div style="font-size:11px; color:${outOfStock ? RED : MUTED}; margin-top:3px;">${outOfStock ? "Out of stock" : p.stock + " in stock"}</div>
+                </div>
+              </button>`;
+            }).join("")}
+            ${filtered.length === 0 ? `<div style="color:${MUTED}; font-size:13px; grid-column:1/-1; padding:20px 4px;">No products match.</div>` : ""}
+          </div>
+        </div>
+
+        <div style="flex:1 1 34%; min-width:270px; background:${PANEL}; border:1px solid ${LINE}; border-top:2px dashed ${LINE}; border-radius:6px; padding:16px; font-family:${MONO};">
+          ${state.receipt ? renderReceipt() : `
+            <div style="font-size:12px; color:${MUTED}; margin-bottom:10px; font-family:Inter,sans-serif;">
+              ${itemCount === 0 ? "Cart is empty" : itemCount + " item" + (itemCount > 1 ? "s" : "") + " in cart"}
+            </div>
+            <div style="max-height:280px; overflow-y:auto; margin-bottom:10px;">
+              ${state.cart.map((item) => `
+                <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px dashed ${LINE}; gap:8px;">
+                  <div style="min-width:0;">
+                    <div style="font-size:12.5px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${esc(item.name)}</div>
+                    <div style="font-size:11px; color:${MUTED};">${money(item.price)} each</div>
+                  </div>
+                  <div style="display:flex; align-items:center; gap:4px; flex-shrink:0;">
+                    <button data-qty-dec="${item.id}" style="width:22px; height:22px; border:1px solid ${LINE}; border-radius:4px; background:${PANEL}; cursor:pointer;">-</button>
+                    <span style="font-size:12.5px; width:16px; text-align:center;">${item.qty}</span>
+                    <button data-qty-inc="${item.id}" style="width:22px; height:22px; border:1px solid ${LINE}; border-radius:4px; background:${PANEL}; cursor:pointer;">+</button>
+                    <button data-remove="${item.id}" style="width:22px; height:22px; border:none; background:transparent; cursor:pointer; color:${RED};">&times;</button>
+                  </div>
+                </div>`).join("")}
+            </div>
+            <div style="border-top:1px solid ${LINE}; padding-top:10px;">
+              ${row("Subtotal", money(subtotal))}
+              ${row("Tax (" + Math.round((state.settings.taxRate || 0) * 100) + "%)", money(tax))}
+              ${row("Total", money(total), true)}
+            </div>
+            <div style="display:flex; gap:8px; margin:14px 0 12px; font-family:Inter,sans-serif;">
+              ${["Cash", "Card", "Mobile"].map((id) => {
+                const active = state.payment === id;
+                return `<button data-payment="${id}" style="flex:1; padding:8px 6px; border-radius:6px; font-size:12px; cursor:pointer;
+                  border:1px solid ${active ? GREEN_DARK : LINE}; background:${active ? "#E7F0EA" : PANEL}; color:${active ? GREEN_DARK : INK}; font-weight:${active ? 600 : 400};">${id}</button>`;
+              }).join("")}
+            </div>
+            <button data-charge style="width:100%; padding:12px; border-radius:7px; border:none; font-size:14px; font-weight:600; font-family:Inter,sans-serif;
+              background:${state.cart.length === 0 ? "#B7BEB4" : GREEN}; color:#fff; cursor:${state.cart.length === 0 ? "default" : "pointer"};" ${state.cart.length === 0 ? "disabled" : ""}>
+              Charge ${money(total)}
+            </button>
+          `}
+        </div>
+      </div>
+    `;
+  }
+
+  function renderReceipt() {
+    const r = state.receipt;
+    return `
+      <div style="text-align:center; margin-bottom:12px;">
+        <div style="font-size:13px; font-weight:600; font-family:Inter,sans-serif;">${esc(state.settings.shopName)}</div>
+        <div style="font-size:11px; color:${MUTED};">Order #${String(r.number).padStart(4, "0")}</div>
+        <div style="font-size:11px; color:${MUTED};">${new Date(r.time).toLocaleString()}</div>
+        <div style="font-size:11px; color:${MUTED};">Served by ${esc(r.cashierName)}</div>
+      </div>
+      <div style="border-top:1px dashed ${LINE}; border-bottom:1px dashed ${LINE}; padding:10px 0; margin:10px 0;">
+        ${r.items.map((i) => `<div style="display:flex; justify-content:space-between; font-size:12px; padding:3px 0;"><span>${i.qty} x ${esc(i.name)}</span><span>${money(i.price * i.qty)}</span></div>`).join("")}
+      </div>
+      ${row("Subtotal", money(r.subtotal))}
+      ${row("Tax", money(r.tax))}
+      ${row("Total", money(r.total), true)}
+      <div style="font-size:12px; color:${MUTED}; margin-top:8px;">Paid by ${esc(r.payment)}</div>
+      <div style="text-align:center; font-size:11px; color:${MUTED}; margin:14px 0;">Thank you for shopping with us</div>
+      <button data-new-sale style="width:100%; padding:11px; border-radius:7px; border:1px solid ${GREEN_DARK}; background:${PANEL}; color:${GREEN_DARK}; font-size:13px; font-weight:600; cursor:pointer; font-family:Inter,sans-serif;">New sale</button>
+    `;
+  }
+
+  function row(label, value, big) {
+    return `<div style="display:flex; justify-content:space-between; font-size:${big ? "15px" : "12.5px"}; font-weight:${big ? 700 : 400}; padding:${big ? "6px 0 0" : "3px 0"}; color:${big ? INK : MUTED};">
+      <span>${esc(label)}</span><span>${value}</span></div>`;
+  }
+
+  function renderInventory() {
+    return `
+      <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <span style="font-weight:600; font-size:14px;">Inventory</span>
+          <button data-new-product style="padding:6px 12px; border-radius:6px; border:1px solid ${GREEN_DARK}; background:${GREEN_DARK}; color:#fff; font-size:13px; cursor:pointer;">Add product</button>
+        </div>
+        ${state.editingProduct ? renderProductForm() : ""}
+        <div style="max-height:420px; overflow-y:auto;">
+          <table style="width:100%; border-collapse:collapse; font-size:13px;">
+            <thead>
+              <tr style="text-align:left; color:${MUTED}; border-bottom:1px solid ${LINE};">
+                <th style="padding:6px 4px; font-weight:500;">Name</th>
+                <th style="padding:6px 4px; font-weight:500;">Category</th>
+                <th style="padding:6px 4px; font-weight:500; text-align:right;">Price</th>
+                <th style="padding:6px 4px; font-weight:500; text-align:right;">Stock</th>
+                <th style="padding:6px 4px;"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${state.products.map((p) => `
+                <tr style="border-bottom:1px solid ${LINE};">
+                  <td style="padding:7px 4px;">${esc(p.name)}</td>
+                  <td style="padding:7px 4px; color:${MUTED};">${esc(p.cat)}</td>
+                  <td style="padding:7px 4px; text-align:right; font-family:${MONO};">${money(p.price)}</td>
+                  <td style="padding:7px 4px; text-align:right;">${p.stock}</td>
+                  <td style="padding:7px 4px; text-align:right; white-space:nowrap;">
+                    <button data-edit-product="${p.id}" style="border:none; background:transparent; color:${GREEN_DARK}; cursor:pointer; font-size:12px; margin-right:8px;">Edit</button>
+                    <button data-delete-product="${p.id}" style="border:none; background:transparent; color:${RED}; cursor:pointer; font-size:12px;">Delete</button>
+                  </td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderProductForm() {
+    const p = state.editingProduct === "new" ? { id: "", name: "", cat: "Apparel", price: "", stock: "" } : state.products.find((x) => x.id === state.editingProduct) || {};
+    return `
+      <div style="background:${PAGE}; border:1px solid ${LINE}; border-radius:6px; padding:12px; margin-bottom:14px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px,1fr)); gap:8px; margin-bottom:8px;">
+          <input id="pf-name" placeholder="Product name" value="${esc(p.name || "")}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+          <select id="pf-cat" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;">
+            ${CATS.filter((c) => c !== "All").map((c) => `<option value="${c}" ${p.cat === c ? "selected" : ""}>${c}</option>`).join("")}
+          </select>
+          <input id="pf-price" type="number" step="0.01" min="0" placeholder="Price" value="${p.price === "" ? "" : p.price}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+          <input id="pf-stock" type="number" step="1" min="0" placeholder="Stock" value="${p.stock === "" ? "" : p.stock}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+        </div>
+        <div id="pf-error" style="color:${RED}; font-size:12px; margin-bottom:8px; display:none;"></div>
+        <div style="display:flex; gap:8px;">
+          <button data-save-product="${p.id || "new"}" style="padding:7px 14px; border-radius:6px; border:none; background:${GREEN}; color:#fff; font-size:13px; cursor:pointer;">Save</button>
+          <button data-cancel-product style="padding:7px 14px; border-radius:6px; border:1px solid ${LINE}; background:${PANEL}; font-size:13px; cursor:pointer;">Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSales() {
+    const visibleOrders = isAdmin() ? state.orders : state.orders.filter((o) => o.cashierId === state.currentUser.id);
+    const totalRevenue = visibleOrders.reduce((s, o) => s + o.total, 0);
+    return `
+      <div style="display:flex; gap:12px; margin-bottom:14px; flex-wrap:wrap;">
+        <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:12px 16px; flex:1; min-width:140px;">
+          <div style="font-size:12px; color:${MUTED};">Orders</div>
+          <div style="font-size:20px; font-weight:600;">${visibleOrders.length}</div>
+        </div>
+        <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:12px 16px; flex:1; min-width:140px;">
+          <div style="font-size:12px; color:${MUTED};">${isAdmin() ? "Total revenue" : "Your revenue"}</div>
+          <div style="font-size:20px; font-weight:600; font-family:${MONO};">${money(totalRevenue)}</div>
+        </div>
+      </div>
+      <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:16px;">
+        ${visibleOrders.length === 0 ? `<div style="color:${MUTED}; font-size:13px;">No sales yet.</div>` : visibleOrders.map((o) => `
+          <div style="border-bottom:1px solid ${LINE}; padding:10px 0;">
+            <div style="display:flex; justify-content:space-between; font-size:13px;">
+              <span>Order #${String(o.number).padStart(4, "0")} &middot; ${esc(o.payment)}${isAdmin() ? " &middot; " + esc(o.cashierName || "-") : ""}</span>
+              <span style="font-family:${MONO}; font-weight:600;">${money(o.total)}</span>
+            </div>
+            <div style="font-size:11px; color:${MUTED};">${new Date(o.time).toLocaleString()} &middot; ${o.items.reduce((s, i) => s + i.qty, 0)} items</div>
+          </div>
+        `).join("")}
+      </div>
+    `;
+  }
+
+  function renderStaff() {
+    return `
+      <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <span style="font-weight:600; font-size:14px;">Staff accounts</span>
+          <button data-new-user style="padding:6px 12px; border-radius:6px; border:1px solid ${GREEN_DARK}; background:${GREEN_DARK}; color:#fff; font-size:13px; cursor:pointer;">Add staff</button>
+        </div>
+        ${state.editingUser ? renderUserForm() : ""}
+        <table style="width:100%; border-collapse:collapse; font-size:13px;">
+          <thead>
+            <tr style="text-align:left; color:${MUTED}; border-bottom:1px solid ${LINE};">
+              <th style="padding:6px 4px; font-weight:500;">Name</th>
+              <th style="padding:6px 4px; font-weight:500;">Username</th>
+              <th style="padding:6px 4px; font-weight:500;">Role</th>
+              <th style="padding:6px 4px;"></th>
+            </tr>
+          </thead>
+          <tbody>
+            ${state.users.map((u) => `
+              <tr style="border-bottom:1px solid ${LINE};">
+                <td style="padding:7px 4px;">${esc(u.name)}${state.currentUser.id === u.id ? " (you)" : ""}</td>
+                <td style="padding:7px 4px; color:${MUTED};">${esc(u.username)}</td>
+                <td style="padding:7px 4px;">${u.role === "admin" ? "Admin" : "Cashier"}</td>
+                <td style="padding:7px 4px; text-align:right; white-space:nowrap;">
+                  <button data-edit-user="${u.id}" style="border:none; background:transparent; color:${GREEN_DARK}; cursor:pointer; font-size:12px; margin-right:8px;">Edit</button>
+                  <button data-delete-user="${u.id}" style="border:none; background:transparent; color:${RED}; cursor:pointer; font-size:12px;">Delete</button>
+                </td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>
+    `;
+  }
+
+  function renderUserForm() {
+    const isNew = state.editingUser === "new";
+    const u = isNew ? { id: "", name: "", username: "", password: "", role: "cashier" } : state.users.find((x) => x.id === state.editingUser) || {};
+    return `
+      <div style="background:${PAGE}; border:1px solid ${LINE}; border-radius:6px; padding:12px; margin-bottom:14px;">
+        <div style="display:grid; grid-template-columns:repeat(auto-fit, minmax(120px,1fr)); gap:8px; margin-bottom:8px;">
+          <input id="uf-name" placeholder="Full name" value="${esc(u.name || "")}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+          <input id="uf-username" placeholder="Username" value="${esc(u.username || "")}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+          <input id="uf-password" placeholder="${isNew ? "Password" : "Leave blank to keep current"}" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;" />
+          <select id="uf-role" style="padding:7px 8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px;">
+            <option value="cashier" ${u.role === "cashier" ? "selected" : ""}>Cashier</option>
+            <option value="admin" ${u.role === "admin" ? "selected" : ""}>Admin</option>
+          </select>
+        </div>
+        <div id="uf-error" style="color:${RED}; font-size:12px; margin-bottom:8px; display:none;"></div>
+        <div style="display:flex; gap:8px;">
+          <button data-save-user="${u.id || "new"}" style="padding:7px 14px; border-radius:6px; border:none; background:${GREEN}; color:#fff; font-size:13px; cursor:pointer;">Save</button>
+          <button data-cancel-user style="padding:7px 14px; border-radius:6px; border:1px solid ${LINE}; background:${PANEL}; font-size:13px; cursor:pointer;">Cancel</button>
+        </div>
+      </div>
+    `;
+  }
+
+  function renderSettings() {
+    return `
+      <div style="background:${PANEL}; border:1px solid ${LINE}; border-radius:8px; padding:16px; max-width:420px;">
+        <div style="margin-bottom:12px;">
+          <label style="font-size:12px; color:${MUTED}; display:block; margin-bottom:4px;">Shop name</label>
+          <input id="st-name" value="${esc(state.settings.shopName)}" style="width:100%; padding:8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px; box-sizing:border-box;" />
+        </div>
+        <div style="margin-bottom:16px;">
+          <label style="font-size:12px; color:${MUTED}; display:block; margin-bottom:4px;">Tax rate (%)</label>
+          <input id="st-tax" type="number" min="0" max="100" step="0.1" value="${(state.settings.taxRate * 100).toFixed(1)}" style="width:100%; padding:8px; border:1px solid ${LINE}; border-radius:5px; font-size:13px; box-sizing:border-box;" />
+        </div>
+        <button data-save-settings style="padding:8px 16px; border-radius:6px; border:none; background:${GREEN}; color:#fff; font-size:13px; cursor:pointer; margin-right:8px;">Save</button>
+        <div style="border-top:1px solid ${LINE}; margin-top:20px; padding-top:16px;">
+          <div style="font-size:12px; color:${MUTED}; margin-bottom:8px;">This clears all products, sales history and settings for everyone using this app. Staff accounts are kept.</div>
+          <button data-reset-all style="padding:8px 16px; border-radius:6px; border:1px solid ${RED}; background:transparent; color:${RED}; font-size:13px; cursor:pointer;">Reset shop data</button>
+        </div>
+      </div>
+    `;
+  }
+
+  // ---------- events ----------
+
+  function bindEvents() {
+    const root = document.getElementById("pos-app");
+
+    root.querySelectorAll("[data-tab]").forEach((el) => el.onclick = () => { state.tab = el.getAttribute("data-tab"); render(); });
+    root.querySelectorAll("[data-cat]").forEach((el) => el.onclick = () => { state.cat = el.getAttribute("data-cat"); render(); });
+    root.querySelectorAll("[data-add]").forEach((el) => el.onclick = () => addToCart(el.getAttribute("data-add")));
+    root.querySelectorAll("[data-qty-inc]").forEach((el) => el.onclick = () => changeQty(el.getAttribute("data-qty-inc"), 1));
+    root.querySelectorAll("[data-qty-dec]").forEach((el) => el.onclick = () => changeQty(el.getAttribute("data-qty-dec"), -1));
+    root.querySelectorAll("[data-remove]").forEach((el) => el.onclick = () => removeItem(el.getAttribute("data-remove")));
+    root.querySelectorAll("[data-payment]").forEach((el) => el.onclick = () => { state.payment = el.getAttribute("data-payment"); render(); });
+    const chargeBtn = root.querySelector("[data-charge]");
+    if (chargeBtn) chargeBtn.onclick = charge;
+    const newSaleBtn = root.querySelector("[data-new-sale]");
+    if (newSaleBtn) newSaleBtn.onclick = newSale;
+
+    const search = root.querySelector("#pos-search");
+    if (search) {
+      search.oninput = (e) => { state.query = e.target.value; };
+      search.addEventListener("keyup", () => { render(); const s = document.getElementById("pos-search"); if (s) { s.focus(); s.selectionStart = s.selectionEnd = s.value.length; } });
+    }
+
+    const newProductBtn = root.querySelector("[data-new-product]");
+    if (newProductBtn) newProductBtn.onclick = () => { state.editingProduct = "new"; render(); };
+    root.querySelectorAll("[data-edit-product]").forEach((el) => el.onclick = () => { state.editingProduct = el.getAttribute("data-edit-product"); render(); });
+    root.querySelectorAll("[data-delete-product]").forEach((el) => el.onclick = () => deleteProduct(el.getAttribute("data-delete-product")));
+    const cancelBtn = root.querySelector("[data-cancel-product]");
+    if (cancelBtn) cancelBtn.onclick = () => { state.editingProduct = null; render(); };
+    const saveProductBtn = root.querySelector("[data-save-product]");
+    if (saveProductBtn) saveProductBtn.onclick = async () => {
+      const name = document.getElementById("pf-name").value.trim();
+      const cat = document.getElementById("pf-cat").value;
+      const price = parseFloat(document.getElementById("pf-price").value);
+      const stock = parseInt(document.getElementById("pf-stock").value, 10);
+      const errEl = document.getElementById("pf-error");
+      if (!name || isNaN(price) || price < 0 || isNaN(stock) || stock < 0) {
+        errEl.textContent = "Enter a name, a valid price, and a valid stock count.";
+        errEl.style.display = "block";
+        return;
+      }
+      const id = saveProductBtn.getAttribute("data-save-product");
+      const productId = id === "new" ? "p_" + Date.now() : id;
+      await upsertProduct({ id: productId, name, cat, price, stock });
+    };
+
+    const newUserBtn = root.querySelector("[data-new-user]");
+    if (newUserBtn) newUserBtn.onclick = () => { state.editingUser = "new"; render(); };
+    root.querySelectorAll("[data-edit-user]").forEach((el) => el.onclick = () => { state.editingUser = el.getAttribute("data-edit-user"); render(); });
+    root.querySelectorAll("[data-delete-user]").forEach((el) => el.onclick = () => deleteUser(el.getAttribute("data-delete-user")));
+    const cancelUserBtn = root.querySelector("[data-cancel-user]");
+    if (cancelUserBtn) cancelUserBtn.onclick = () => { state.editingUser = null; render(); };
+    const saveUserBtn = root.querySelector("[data-save-user]");
+    if (saveUserBtn) saveUserBtn.onclick = async () => {
+      const name = document.getElementById("uf-name").value.trim();
+      const username = document.getElementById("uf-username").value.trim();
+      const password = document.getElementById("uf-password").value;
+      const role = document.getElementById("uf-role").value;
+      const errEl = document.getElementById("uf-error");
+      const id = saveUserBtn.getAttribute("data-save-user");
+      const isNew = id === "new";
+      if (!name || !username || (isNew && !password)) {
+        errEl.textContent = "Enter a name, username, and password.";
+        errEl.style.display = "block";
+        return;
+      }
+      const userId = isNew ? "u_" + Date.now() : id;
+      let finalPassword = password;
+      if (!isNew && !password) {
+        const existing = state.users.find((u) => u.id === userId);
+        finalPassword = existing ? existing.password : password;
+      }
+      await upsertUser({ id: userId, name, username, password: finalPassword, role });
+    };
+
+    const saveSettingsBtn = root.querySelector("[data-save-settings]");
+    if (saveSettingsBtn) saveSettingsBtn.onclick = async () => {
+      if (!isAdmin()) return;
+      const name = document.getElementById("st-name").value.trim();
+      const taxPct = parseFloat(document.getElementById("st-tax").value);
+      if (!name || isNaN(taxPct) || taxPct < 0) { flashError("Enter a valid shop name and tax rate."); return; }
+      state.settings.shopName = name;
+      state.settings.taxRate = taxPct / 100;
+      await saveSettings();
+      render();
+    };
+
+    const resetBtn = root.querySelector("[data-reset-all]");
+    if (resetBtn) resetBtn.onclick = () => {
+      if (!isAdmin()) return;
+      if (confirm("Reset all shop data? This cannot be undone.")) resetAllData();
+    };
+
+    const logoutBtn = root.querySelector("[data-logout]");
+    if (logoutBtn) logoutBtn.onclick = () => { state.currentUser = null; state.tab = "sell"; state.cart = []; state.receipt = null; render(); };
+  }
+
+  loadAll();
+})();
+</script>
